@@ -1,0 +1,10 @@
+# Register the public Helm repo that serves the alchemistudio-platform chart the
+# blueprint references (chartRepo: alchemi-helm-charts). Apply this ONCE per cluster
+# BEFORE installing the blueprint.  (When the chart is published to the SUSE Application
+# Collection, repoint the blueprint's chartRepo there and this file is no longer needed.)
+apiVersion: catalog.cattle.io/v1
+kind: ClusterRepo
+metadata:
+  name: alchemi-helm-charts
+spec:
+  url: https://zentiencelabs.github.io/alchemi-public-helm-charts
