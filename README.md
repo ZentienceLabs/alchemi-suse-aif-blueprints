@@ -37,6 +37,11 @@ Full prerequisites + post-install steps are in each blueprint's
 [version README](blueprints/alchemistudio-with-vllm/0.1.0).
 
 ## Notes
+- **Gateway (APISIX):** the chart deploys **Apache APISIX** into the **`apisix` namespace** by
+  default (`gateway.mode: bundled`) as the required ingress / TLS / OIDC-routing layer for the
+  app hostnames — it is core architecture, not an optional or leftover component. Set
+  `gateway.mode: external` to route through your own gateway instead. See the per-version
+  README for details.
 - **Images:** the blueprint pulls AlchemiStudio images from a registry via
   `global.imageCredentials`. A scoped **pull-only** ACR token is baked in (required for image
   pull; distributed the same way as the partner charts), or mirror the images into your own

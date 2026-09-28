@@ -15,6 +15,23 @@ Deploys **alchemistudio-platform 1.0.23** + **vllm** and wires them together.
   (`dp.apps.rancher.io`, `ghcr.io`, `huggingface.co`) — mirror all of these for air-gap.
 - The chart repo registered: `kubectl apply -f ../../clusterrepo/alchemi-helm-charts.clusterrepo.yaml`.
 
+## Gateway / networking (APISIX)
+AlchemiStudio uses **Apache APISIX** as its platform gateway, and the chart **deploys it by
+default into the `apisix` namespace** (`gateway.mode: bundled`, which installs APISIX + etcd).
+This is a **required, core component** of the architecture — not an optional add-on — because
+APISIX is the ingress, TLS-termination, and OIDC/routing layer that fronts every app hostname
+(`alchemi-app`, `alchemi-auth`, `alchemi-ops`, `alchemi-zenith`). After install, the gateway's
+external IP is the `apisix-gateway` LoadBalancer Service in that namespace:
+
+```bash
+kubectl -n apisix get svc apisix-gateway
+```
+
+This is the IP you point your DNS at (or pin up-front with `gateway.loadBalancerIP`). If you
+would rather route through an **existing** gateway, set `gateway.mode: external` in the
+alchemistudio-platform component values — the chart then skips the `apisix` namespace and
+expects you to wire your own ingress to the app Services.
+
 ## Configure before installing (edit `blueprint.yaml`)
 Blueprints render their **baked** values (the AI Factory UI has no per-value form, and
 AIWorkload `componentValues` are not applied to blueprint components), so edit the YAML
