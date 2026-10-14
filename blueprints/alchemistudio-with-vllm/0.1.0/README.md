@@ -2,104 +2,107 @@
 
 Deploys **alchemistudio-platform 1.0.23** + **vllm** and wires them together.
 
+> **Staging copy.** This version pulls the chart from our own `alchemi-helm-charts` repo so new
+> chart versions can be tested before they reach Rancher partner charts. The **official**
+> blueprint is in [SUSE/partner-blueprints](https://github.com/SUSE/partner-blueprints)
+> (`partners/alchemistudio/`) and uses the `rancher-partner-charts` ClusterRepo.
+
 ## Prerequisites
-- **SUSE AI Factory** (aif-operator) on the target RKE2/Rancher cluster.
-- A **GPU node** with runtimeclass `nvidia` and a **free 16 GB GPU** (e.g. T4). vLLM takes
-  the whole GPU — scale any NIM to 0 first (`kubectl -n nim patch nimservice <NAME>
-  --type=merge -p '{"spec":{"replicas":0}}'`).
-- A **kata-enabled** node (the AlchemiStudio code sandbox runs kata-isolated).
-- StorageClass **`local-path`** for the vLLM model cache (the GPU node is typically not a
-  Longhorn node).
-- **cert-manager** for `tls.mode=acme` (or bring your own cert for `byo`).
-- **Egress** to pull the vLLM + TEI images and the Qwen + bge-small weights
-  (`dp.apps.rancher.io`, `ghcr.io`, `huggingface.co`) — mirror all of these for air-gap.
-- The chart repo registered: `kubectl apply -f ../../clusterrepo/alchemi-helm-charts.clusterrepo.yaml`.
+
+- **SUSE AI Factory** (aif-operator) on a Rancher-managed RKE2 cluster.
+- **The `alchemi-helm-charts` ClusterRepo** (our staging Helm repo):
+  ```bash
+  kubectl apply -f ../../../clusterrepo/alchemi-helm-charts.clusterrepo.yaml
+  ```
+- **One free GPU** with ≥16 GB memory (e.g. NVIDIA T4) on a node with runtimeclass `nvidia`.
+  vLLM claims a whole GPU (see step 1 below to check).
+- **A kata-enabled node** — the AlchemiStudio code sandbox / AIOS computer runs kata-isolated.
+- **StorageClass `local-path`** for the vLLM model cache (GPU nodes are usually not Longhorn
+  nodes); **Longhorn** (or another RWX-capable default class) for the platform data.
+- **cert-manager** for `tls.mode=acme` (Let's Encrypt), or your own cert with `tls.mode=byo`.
+- **Egress** to `dp.apps.rancher.io`, `ghcr.io`, `huggingface.co` and `alchemiacr.azurecr.io`
+  (mirror these for an air-gapped install).
+
+## Install — step by step
+
+1. **Check for a free GPU.**
+
+   ```bash
+   for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+     allocatable=$(kubectl get node "$node" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}')
+     if [ -n "$allocatable" ] && [ "$allocatable" -gt 0 ]; then
+       allocated=$(kubectl get pods -A --field-selector spec.nodeName="$node",status.phase!=Failed,status.phase!=Succeeded \
+         -o jsonpath='{range .items[*].spec.containers[*]}{.resources.requests.nvidia\.com/gpu}{"\n"}{end}' \
+         | grep -v '^$' | awk '{s+=$1} END {print s+0}')
+       echo "Node: $node | Total: $allocatable | Allocated: $allocated | Free: $((allocatable - allocated))"
+     fi
+   done
+   ```
+
+   You need `Free >= 1` on at least one node.
+
+2. **Register the `alchemi-helm-charts` ClusterRepo** (see Prerequisites).
+
+3. **Choose how the app is reached** — edit `blueprint.yaml` before registering it (blueprint
+   values are baked; the install wizard does not take per-value input). Set **one** of:
+   - `global.domain: ai.example.com` — real domain. You'll add DNS records in step 7.
+   - `gateway.loadBalancerIP: <reserved static IP>` — no domain; the app is served at
+     `<ip>.nip.io` with no DNS setup.
+
+   If both are blank the install stops with a clear message.
+
+4. **Register the blueprint:** `kubectl apply -f blueprint.yaml` (or let our Fleet GitRepo sync it).
+
+5. **Install** from the AI Factory UI: *Blueprints → AlchemiStudio + vLLM → Install →
+   Fleet Bundle → target cluster → Install.*
+
+6. **Wait for the APISIX gateway** (namespace `apisix`) to get an external IP — this IP fronts
+   every AlchemiStudio hostname:
+
+   ```bash
+   kubectl -n apisix get svc apisix-gateway -w   # wait until EXTERNAL-IP is set, then Ctrl+C
+   ```
+
+7. **Real domain only:** create DNS A-records for `alchemi-app`, `alchemi-auth`, `alchemi-ops`
+   and `alchemi-zenith` `.<your-domain>` pointing at that IP. The TLS certificate is issued
+   automatically once DNS resolves.
+
+8. **Get the URLs and the first login:**
+
+   ```bash
+   kubectl -n alchemi get configmap alchemi-endpoints -o jsonpath='{.data.APP_URL}{"\n"}'
+   kubectl -n alchemi get configmap alchemi-endpoints -o jsonpath='{.data.ADMIN_EMAIL}{"\n"}'
+   kubectl -n alchemi get secret alchemi-secrets -o jsonpath='{.data.FIRST_USER_PASSWORD}' | base64 -d; echo
+   ```
+
+   Keycloak asks for a new password on first login. vLLM needs a few minutes on first install
+   to download the model weights.
+
+## What this blueprint deploys
+
+The `alchemistudio-platform` chart creates its own namespaces (and removes them on uninstall).
+The blueprint's target namespace is `alchemi`.
+
+| Namespace | Created by | What runs there |
+|---|---|---|
+| `alchemi` | blueprint target | App tier: web, ai, worker, workflow, zenith, compute-api, embeddings (TEI), AIOS workers |
+| `alchemi-data` | platform chart | PostgreSQL (pgvector), Redis, SeaweedFS object store |
+| `auth` | platform chart | Keycloak (login / OIDC) |
+| `observability` | platform chart | OpenObserve (logs, metrics, traces) |
+| `albox` | platform chart | Code sandboxes and the AIOS computer (kata-isolated) |
+| `apisix` | platform chart | APISIX gateway + etcd — `apisix-gateway` is the external LoadBalancer |
+| `openbao` | platform chart | OpenBao (secrets store) |
+| `external-secrets` | platform chart | External Secrets Operator |
+| `vllm-serve` | vllm component | vLLM engine + router (GPU) |
+
+**Why vLLM has its own namespace:** it's intentional. The GPU model server is the expensive,
+independently-sized part of the stack, so keeping it separate lets you apply GPU quotas and
+policies to it, and upgrade or swap the model (e.g. to a larger model) without touching the
+platform namespaces.
 
 ## Gateway / networking (APISIX)
-AlchemiStudio uses **Apache APISIX** as its platform gateway, and the chart **deploys it by
-default into the `apisix` namespace** (`gateway.mode: bundled`, which installs APISIX + etcd).
-This is a **required, core component** of the architecture — not an optional add-on — because
-APISIX is the ingress, TLS-termination, and OIDC/routing layer that fronts every app hostname
-(`alchemi-app`, `alchemi-auth`, `alchemi-ops`, `alchemi-zenith`). After install, the gateway's
-external IP is the `apisix-gateway` LoadBalancer Service in that namespace:
 
-```bash
-kubectl -n apisix get svc apisix-gateway
-```
-
-This is the IP you point your DNS at (or pin up-front with `gateway.loadBalancerIP`). If you
-would rather route through an **existing** gateway, set `gateway.mode: external` in the
-alchemistudio-platform component values — the chart then skips the `apisix` namespace and
-expects you to wire your own ingress to the app Services.
-
-## Configure before installing (edit `blueprint.yaml`)
-Blueprints render their **baked** values (the AI Factory UI has no per-value form, and
-AIWorkload `componentValues` are not applied to blueprint components), so edit the YAML
-before you register it:
-
-- **Hostname — set EITHER `global.domain` OR `gateway.loadBalancerIP`** (one is required;
-  the install **fails fast if BOTH are blank**). Use `global.domain` for a real domain, or
-  `gateway.loadBalancerIP` (a reserved static IP) for a DNS-less test — the app is then
-  served at `<ip>.nip.io` automatically. See "Getting a working hostname" below.
-- **`global.imageCredentials`** — a scoped, **pull-only** ACR token is **baked in** (required
-  to pull the app images; distributed the same way as the partner charts). For a real customer
-  deployment you can instead mirror the images into your own registry and set your own creds.
-- **admin** — `admin.email` / `admin.initialPassword`. The first user gets the Copilot seat.
-- **TLS** — `tls.mode=acme` (Let's Encrypt) or `byo`.
-- **Off by default:** guardrails + ClamAV (`guardrails.enabled=false`). Enable for a
-  hardened deployment.
-
-## Getting a working hostname (domain or static IP)
-The install needs **either** a real domain **or** a pinned static IP. If **both** are blank
-it **stops** with a clear message (no usable hostname). Pick one:
-
-- **A — Real domain (recommended / production).** Set `global.domain` (e.g.
-  `alchemi.acme.com`), install, read the gateway IP (`kubectl -n apisix get svc
-  apisix-gateway`), and create DNS A-records for each subdomain (`alchemi-app.<domain>`,
-  `alchemi-auth.<domain>`, …) → that IP. The TLS cert is **pending until those A-records
-  resolve** — once they do, cert-manager issues a trusted Let's Encrypt cert automatically.
-- **B — Static IP, no domain (quick trusted test — this is what we use).** Leave
-  `global.domain` blank and set **`gateway.loadBalancerIP`** to a reserved static IP. The
-  chart pins the gateway to that IP and serves the app at `<ip>.nip.io` — no DNS setup, and
-  Let's Encrypt issues a trusted cert in **one phase** (`nip.io` resolves the host to your
-  IP immediately). `gateway.loadBalancerIP` is **one portable knob** — it works on
-  **bare-metal (MetalLB)** and **Azure** alike (on Azure the IP must be a pre-reserved
-  Public IP in the cluster's own resource group).
-  - *Escape hatch:* if your reserved IP lives in a **different** resource group (Azure) or
-    your LB needs a provider-specific hint, use `gateway.serviceAnnotations` instead (e.g.
-    Azure `service.beta.kubernetes.io/azure-pip-name` + `…-resource-group`, or AWS
-    `aws-load-balancer-eip-allocations`).
-- **C — Two-phase, no reservation (DNS-less).** Install with a placeholder `global.domain`,
-  read the assigned gateway IP, set `global.domain: "<ip>.nip.io"`, and **re-apply** the
-  blueprint (a Fleet *upgrade* keeps the same apisix IP). The cert issues only after this
-  **second** apply, and the IP isn't stable across a full teardown — so prefer **B** whenever
-  you can reserve an IP.
-
-> nip.io is a free wildcard DNS that maps `anything.<IP>.nip.io → <IP>` — handy for tests, no
-> DNS setup. For anything lasting, use a real domain (path A).
-
-## Install
-```bash
-kubectl apply -f blueprint.yaml           # register (with your domain set)
-# then AI Factory UI: Blueprints -> AlchemiStudio + vLLM -> Install -> Fleet Bundle -> Install
-```
-
-## After install
-```bash
-# gateway IP (for DNS A-records if you set a real domain):
-kubectl -n apisix get svc apisix-gateway
-# app URLs (computed from your domain + subdomains):
-kubectl -n alchemi get configmap alchemi-endpoints \
-  -o jsonpath='App:  {.data.APP_URL}{"\n"}Auth: https://{.data.AUTH_HOST}{"\n"}Ops:  https://{.data.OPS_HOST}{"\n"}'
-# login credentials:
-kubectl -n alchemi get configmap alchemi-endpoints -o jsonpath='{.data.ADMIN_EMAIL}' ; echo
-kubectl -n alchemi get secret alchemi-secrets -o jsonpath='{.data.FIRST_USER_PASSWORD}' | base64 -d ; echo
-# verify the model wiring (account-scoped provider + model):
-kubectl -n alchemi-data exec alchemi-pgvector-0 -- \
-  psql -U alchemiadmin -d alchemiapp_db \
-  -c "select scope, provider_id, deployment_name from config_models where provider_id in ('suse_open','suse_embed');"
-```
-
-Log in, pick **Qwen2.5 3B (SUSE vLLM)** in the Copilot model dropdown, and chat — the seat,
-credits, pricing, and provider credential are already seeded. (vLLM takes ~2–3 min after the
-pods come up to download the model weights on first install.)
+The chart deploys **Apache APISIX** into the `apisix` namespace by default
+(`gateway.mode: bundled`) as the ingress, TLS-termination and OIDC/routing layer for every app
+hostname. Set `gateway.mode: external` in the alchemistudio-platform component values to route
+through an existing gateway instead.

@@ -8,9 +8,11 @@ stand up a complete stack from the AI Factory UI — no per-value form. The Helm
 blueprint deploys (`alchemistudio-platform`) is published separately as a Rancher App /
 Helm repo; this repo holds only the **Blueprint definitions**.
 
-> SUSE is building an official partner-blueprints repository (similar to
-> `rancher/partner-charts`). Until then this repo hosts the blueprints, structured so it
-> ports there cleanly.
+> **This is our staging / testing copy.** The **official** AlchemiStudio blueprint lives in
+> [SUSE/partner-blueprints](https://github.com/SUSE/partner-blueprints) (`partners/alchemistudio/`)
+> and pulls the chart from the `rancher-partner-charts` ClusterRepo. This copy pulls from our own
+> Helm repo instead, so new chart versions can be tested through our Fleet GitRepo before they
+> reach Rancher partner charts. Use the SUSE copy for real installs.
 
 ## Blueprints
 
@@ -24,10 +26,11 @@ Helm repo; this repo holds only the **Blueprint definitions**.
    ```bash
    kubectl apply -f clusterrepo/alchemi-helm-charts.clusterrepo.yaml
    ```
-2. **Set your domain** in the blueprint (`global.domain` is blank on purpose — the app
-   hostnames are `<subdomain>.<domain>`), then register it:
+2. **Choose how the app is reached** in the blueprint — set **one** of `global.domain`
+   (real domain) or `gateway.loadBalancerIP` (static IP, served at `<ip>.nip.io`) — then
+   register it:
    ```bash
-   # edit blueprints/alchemistudio-with-vllm/0.1.0/blueprint.yaml -> global.domain
+   # edit blueprints/alchemistudio-with-vllm/0.1.0/blueprint.yaml
    kubectl apply -f blueprints/alchemistudio-with-vllm/0.1.0/blueprint.yaml
    ```
 3. **Install from the AI Factory UI**: Blueprints → *AlchemiStudio + vLLM* → Install →
